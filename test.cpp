@@ -1,4 +1,5 @@
 #include<iostream>
+#include<stdio.h>
 
 using namespace std;
 
@@ -14,12 +15,58 @@ namespace MySecondnamespace{
 	void cout_t(void){
 		cout << "this is my secount name space" << a <<endl;
 	}
+	void test_1(void){
+	};
 }
 using namespace MyFirstnamespace;
+
+class MyBook{
+	public:
+		int get_size(void);
+		int set_size(int x,int y);
+
+	protected:
+		int hig; //长
+		int wih; //宽
+
+};
+
+int MyBook::get_size(void)
+{
+	return hig*wih;
+}
+
+int MyBook::set_size(int x,int y)
+{
+	hig= x;
+	wih= y;
+
+	return 0;
+}
+
+class Myc:public MyBook{
+	public:
+		int get_all_size(void);
+		int set_all_size(int min){
+			h = min;
+		}
+
+	private:
+		int h;
+};
+
+int Myc::get_all_size(void)
+{
+	//return get_size()*h;
+	return wih*hig*h;
+}
+
 
 int main(void)
 {
 
+	char *p = new char[1024];
+	MyBook *book = new MyBook;
 	cout << "hello this is my test c++" << endl;
 	MyFirstnamespace::a = 3;
 	MySecondnamespace::a = 100;
@@ -27,5 +74,18 @@ int main(void)
 	MySecondnamespace::cout_t();
 	a = 102;
 	cout_t();
+	//memcpy(p,10101,1024);
+	p[0] = 'c';  
+	cout << p << endl;
+	book->set_size(100,2);
+	Myc cidian;
+	cidian.set_size(12,34);
+	cidian.set_all_size(2);
+	cout << cidian.get_size() << endl;
+	cout << cidian.get_all_size() << endl;
+	cout << book->get_size() << endl;
+
+	delete book;
+	delete p;
 	return 0;
 }
