@@ -7,3 +7,5 @@ all:
 
 clean:
 	rm ${OUT} -rf
+	clear
+
