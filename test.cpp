@@ -3,6 +3,7 @@
 #include<pthread.h>
 
 using namespace std;
+void *test_thread(void *arg);
 
 
 namespace MyFirstnamespace{
@@ -19,7 +20,8 @@ namespace MySecondnamespace{
 	void test_1(void){
 	};
 }
-using namespace MyFirstnamespace;
+//using namespace MyFirstnamespace;
+using namespace MySecondnamespace;
 
 class MyBook{
 	public:
@@ -69,9 +71,10 @@ int Myc::get_all_size(void)
 class Thread{
 
 	public:
+	pthread_t pid;
 		int open_thread(void* handle)
 		{
-			ret = pthread_create(&pid, NULL, (void*)test_thread, NULL);
+			ret = pthread_create(&pid, NULL, test_thread, NULL);
 			return 0;
 		}
 
@@ -80,17 +83,47 @@ class Thread{
 
 	private:
 		int ret;
-		pthread_t pid;
-		void *test_thread(void *arg)
-		{
-			while(1)
-			{
-				cout << "test thrad " <<endl;
-				sleep(1);
-			}
-			return  NULL;
-		}
 };
+
+void *test_thread(void *arg)
+{
+
+	while(1)
+	{
+		cout << "test thrad " <<endl;
+		sleep(1);
+	}
+	return  NULL;
+};
+
+
+class funtion{
+	public:
+		funtion(void){ //构造函数,名称要与，类名称一致
+			cout << "this is no argumen" << endl;
+		}
+		funtion(int x){
+			cout << "this is the one argument x = " << x << endl;
+			m_x = x;
+		}
+		funtion(int x,int y){
+			cout << "this is the  two argumen x= "<< x << "y= "<<y << endl;
+			m_x = x;
+			m_y = y;
+		}
+		void print(void){
+			cout << " m_x = "<< m_x << "m_y= "<< m_y << endl;
+		}
+
+	protected:
+		int a;
+
+	private:
+		int m_x;
+		int m_y;
+};
+
+
 
 int main(void)
 {
@@ -117,5 +150,13 @@ int main(void)
 
 	delete book;
 	delete p;
+	cout << "-----------------------------------------"<<endl;
+	funtion test;
+	test.print();
+	funtion test2(22);
+	test2.print();
+	funtion test3 (45,129);
+	test3.print();
+
 	return 0;
 }
