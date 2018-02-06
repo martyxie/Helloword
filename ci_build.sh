@@ -75,7 +75,7 @@ test_while()
 	return 0
 }
 
-test_array()
+function test_array()
 {
 	for((i=0;i<10;i++))
 	do
@@ -97,8 +97,15 @@ test_array()
 
 }
 
+function test_awk()
+{
+	ls -l
+
+}
+
+
 #mian
-main()
+function main()
 {
 	echo "beigin to test"
 	the_second
@@ -106,9 +113,10 @@ main()
 	test_for
 	test_while
 	test_array
+	test_awk
 	return 0;
 }
-
+#真正的main函数入口
 main
 exit 1
 
