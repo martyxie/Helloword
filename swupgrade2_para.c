@@ -13,6 +13,10 @@
 #include "swparameter.h"
 #include "swfile.h"
 #include "swssl.h"
+#include "swjson.h"
+
+#define  UPGRADE_PARA_PATH "/var/para_data"
+extern int swsyscmd(const char* cmd );
 
 static swupg_para_t m_upg;
 
@@ -172,12 +176,12 @@ static bool check_para_config_setting(swupg_para_t *file,int size)
 
 typedef struct _para_t
 {
-	char name[256];
+	char name[128];
 	char value[256];
 }para_t;
 
 //升级参数,只升级存在的参数不存在的不升级,权限控制
-static int upgrade_para_data(char *buf,int size)
+static int upgrade_para_data(const char *buf,int size)
 {
 	if(buf == NULL || buf[0] == '\0')
 		return -1;
@@ -186,7 +190,7 @@ static int upgrade_para_data(char *buf,int size)
 	int strsize = strlen(buf);
 	if(strsize > size)
 		strsize = size;
-	char *p, *e, *name_s, *name_e;
+	const char *p, *e, *name_s, *name_e;
 	int len = 0;
 	int num = 0;
 	//分析数据
@@ -203,9 +207,15 @@ static int upgrade_para_data(char *buf,int size)
 			p++;
 		e = p;
 
-		/* 忽略: 注释,空行,老版本参数信息 */ 
+		/* 忽略: 注释,空行,老版本参数信息*/ 
 		if( *name_s == '#' || e <= name_s)
 			goto NEXT_ROW;
+		/* 如果得到一个 标签的开头,则说明已经结束,定制处理*/
+		if(*name_s == '[')
+		{
+			printf("find the end of ParameterResetList\n");
+			break;
+		}
 		/* 找到name/value分隔符，得到参数名称 */
 		p = name_s;
 		while( *p != ' ' && *p != '\t' && *p != ':' && *p != '=' && p < e )
@@ -235,7 +245,10 @@ static int upgrade_para_data(char *buf,int size)
 
 			if(sw_parameter_get(para_upg.name,tmp_value,sizeof(tmp_value))) //确保每次只升级已存在的参数
 			{
-				sw_parameter_set(para_upg.name,para_upg.value);
+				if(strstr(para_upg.name,"password")) //如果是更新密码参数
+					sw_parameter_safe_set(para_upg.name, para_upg.value);
+				else
+					sw_parameter_set(para_upg.name,para_upg.value);
 				num ++;
 			}
 		}
@@ -248,6 +261,376 @@ NEXT_ROW:
 	return num;
 }
 
+//把配置文件保存待flash中,同时删除旧的文件
+static void upgade_para_file_save(const char *filename,const char *data,int size)
+{
+	struct stat path;
+	char buf[48] = {0};
+	FILE *fp = NULL;
+	int letfsize = size;
+	int ret = 0;
+	if(lstat(UPGRADE_PARA_PATH,&path) != 0)
+		mkdir(UPGRADE_PARA_PATH,0600);
+	else //清空该目录下的所有文件
+	{
+		sw_snprintf(buf,sizeof(buf),0,sizeof(buf)-1,"rm %s/* -f",UPGRADE_PARA_PATH);
+		swsyscmd(buf);
+	}
+	//保存文件
+	sw_memset(buf,sizeof(buf),0,sizeof(buf));
+	sw_snprintf(buf,sizeof(buf),0,sizeof(buf)-1,"%s/%s",UPGRADE_PARA_PATH,filename);
+	printf("filename = %s\n",buf);
+	fp = fopen(buf,"w");
+	if(fp == NULL)
+	{
+		printf("fail to open %s\n",buf);
+		return;
+	}
+	// 写数据
+	do{
+		ret = fwrite(data,sizeof(char),letfsize,fp);
+		letfsize -= ret;
+	}while(letfsize > 0 && ret > 0);
+	fclose(fp);
+	fp = NULL;
+	return;
+}
+
+//sha256的对比,一致返回true
+static bool sha256_check(const char *data,int size,const char *sha256_code)
+{
+	if(data == NULL || sha256_code == NULL )
+		return  false;
+
+	unsigned char chip_text[32] = {0};
+	char checkcode[68] = {0};// 计算sha256的值
+	int i = 0;
+	int pos = 0;
+	int ret = 0;
+	//对比sha256的值
+	ret = sw_sha256_sum(chip_text, (unsigned char *)data,size);
+	for(i=0;i<ret;i++)
+		pos += snprintf(&checkcode[pos],sizeof(checkcode)-pos,"%02x",chip_text[i]);
+	if(strncmp(checkcode,sha256_code,pos) != 0)
+	{
+		printf("checkcode is no macth\n");
+		return false;
+	}
+	return true;
+}
+
+typedef struct _para_fileter
+{
+	char *name;
+	bool result;
+}para_fileter_t;
+
+static bool para_check_softversion(const char *list,const char *key,int keylen)
+{
+	if(list == NULL || key == NULL)
+		return false;
+	if(strncmp(list,key,keylen) != 0)
+	{
+		printf("list and  key is not macth\n");
+		return false;
+	}
+	const char *p,*e,*value_s;
+	char huawei_version[48] = {0};
+	int len = 0;
+	p = list;
+	e = p+strlen(p);
+	value_s = NULL;
+	while( *p != '\t' && *p != '\r' && *p != '\n' && *p != '\0' && p < e )
+	{
+		if(*p == '=')
+		{
+			value_s = ++p;
+			break;
+		}
+		p++;
+	}
+	if(value_s == NULL) //说明没有指定版本
+		return true;
+	printf(" p ==%p\n",p);
+	while( *p == ' ' && *p != '\0' && p < e) //去掉开始的空格
+		p++;
+	value_s = p;
+
+	printf(" p ==%p\n",p);
+	while(*p != '\t' && *p != '\r' && *p != '\n' && *p != '\0' && p < e ) //找到结束
+		p++;
+	//将末尾的空格去掉
+	printf(" p ==%p\n",p);
+	do{
+		p--;
+	}while(*p == ' ' && p > value_s);
+
+	len = p - value_s + 1; //收尾字符要算上
+	if(len == 0)
+		return  true;
+	else if(len != len)
+	{
+		printf("len can not macth\n");
+		return false;
+	}
+	//对比版本号
+	if(strncasecmp(value_s,"EC2108CV5 V100R001C00LMXM37SPC001B001",len) == 0)
+		return true;
+	else
+	{
+		printf("version is not macth ,%s\n",HUAWEI_VERSION);
+		return false;
+	}	
+}
+
+static bool check_ip(const char *ip)
+{
+	if(ip == NULL)
+		return false;
+	int len = strlen(ip);
+	if(len > 15)
+		return false;
+	char tmp_buf[16] = {0};
+	sw_memcpy(tmp_buf,sizeof(tmp_buf),ip,len,len);
+	int i = 0;
+	int count = 0;
+	int num = 0;
+	char *p = tmp_buf;
+
+	for(i = 0; i < len; i++)
+	{
+		if(tmp_buf[i] == '.')
+		{
+			count ++;
+			tmp_buf[i]='\0';
+			num = atoi(p);
+			if(num > 255)
+				return false;
+			p = &tmp_buf[i+1];
+		}else if(tmp_buf[i] == ' ')
+		{
+			printf("ip string include space char\n");
+			return  false;
+		}
+	}
+	if(count == 3)
+		return true;
+
+	return false;
+}
+
+//json 中的内容解析
+static bool para_fileter_priv_info(const char *formname,const char *formvalue,const char *toname,const char *tovalue)
+{
+	if(formname == NULL || formvalue == NULL || toname == NULL || tovalue == NULL)
+		return false;
+	//分别比较
+	char tmp_buf[32] = {0};
+	int form_len = strlen(formvalue);
+	int to_len = strlen(tovalue);
+
+	if(strncasecmp(formname,"FromMac",strlen("FromMac")) == 0 && strncasecmp(toname,"toMac",strlen("toMac")) == 0)
+	{
+		sw_strlcpy(tmp_buf,sizeof(tmp_buf),sw_network_get_mac(),sizeof(tmp_buf) -1);
+		int mac_len = strlen(tmp_buf);
+		printf("mac is %s\n",tmp_buf);
+
+		if(form_len != to_len || mac_len != to_len)
+		{
+			printf("mac len is not macth\n");
+			return false;
+		}
+		if(strncasecmp(formvalue,tmp_buf,mac_len) <= 0 && strncasecmp(tmp_buf,tovalue,mac_len) <= 0)
+		{
+			printf("this mac will be allowed\n");
+			return  true;
+		}
+	}
+	else if(strncasecmp(formname,"FromUser",strlen("FromUser")) == 0 && strncasecmp(toname,"ToUser",strlen("ToUser")) == 0)
+	{
+		sw_parameter_get("ntvuseraccount",tmp_buf,sizeof(tmp_buf));
+		int usr_len = strlen(tmp_buf);
+		int i = 0;
+		printf("ntvuseraccount is %s\n",tmp_buf);
+		if(tmp_buf[0] == '\0')
+		{
+			printf("not usr_account to cmp\n");
+			return  false;
+		}
+		if( form_len != to_len) //规格要求,不一样的情况下,均为数字,并且最大不能超过20个
+		{
+			if(form_len > 20 || to_len > 20)
+			{
+				printf("fileist usr acount len too long\n");
+				return false;
+			}
+
+			for(i = 0; i < usr_len; i++)
+			{
+				if( tmp_buf[i] < '0' || tmp_buf[i] > '9')
+				{
+					printf("usr acount is not all digital\n");
+					return false;
+				}
+			}
+
+			for(i = 0; i < form_len; i++)
+			{
+				if( formvalue[i] < '0' || formvalue[i] > '9')
+				{
+					printf("filelist form acount is not all digital\n");
+					return false;
+				}
+			}
+
+			for(i = 0; i < to_len; i++)
+			{
+				if( tovalue[i] < '0' || tovalue[i] > '9')
+				{
+					printf("filelist to acount is not all digital\n");
+					return false;
+				}
+			}
+			//纯数字的情况下先比较长度,长度短的小
+			if(form_len < to_len && usr_len <= to_len)
+			{
+				if(form_len == usr_len)
+				{
+					if(strncmp(formvalue,tmp_buf,usr_len) <= 0)
+						return true;
+				}
+				else if(to_len == usr_len)
+				{
+					if(strncmp(tmp_buf,tovalue,usr_len) <= 0)
+						return true;
+				}
+				else
+					return true;
+			}
+		}
+		else if(form_len == usr_len) //与盒子的usrid长度一样,才认为头端配置正确
+		{
+			if(strncmp(formvalue,tmp_buf,usr_len)<=0 && strncmp(tmp_buf,tovalue,usr_len)<=0)
+				return true;
+		}
+	}
+	else if(strncasecmp(formname,"FromIp",strlen("FromIp")) == 0 && strncasecmp(toname,"ToIp",strlen("ToIp")) == 0)
+	{
+		sw_strlcpy(tmp_buf,sizeof(tmp_buf),sw_network_get_currentip(),sizeof(tmp_buf) -1);
+
+		in_addr_t local_ip = 0;
+		in_addr_t form_ip = 0;
+		in_addr_t to_ip = 0;
+
+		local_ip = inet_addr(tmp_buf);
+
+		if(check_ip(formvalue) && check_ip(tovalue)) //校验合法性
+		{
+			form_ip = inet_addr(formvalue);
+			to_ip = inet_addr(tovalue);
+
+			if(form_ip <= local_ip && local_ip <= to_ip)
+			{
+				printf("this ip will be allow\n");
+				return true;
+			}
+		}
+		printf("loacl_ip not included ,loca_ip = %u,form_ip = %u,to_ip = %u\n",local_ip,form_ip,to_ip);
+	}
+	printf("not filelist is not match\n");
+	return  false;
+}
+
+//传进来的 list 的开始就是key
+static bool para_fileter_decode(const char *list,const char *key,int keylen)
+{
+	if(list == NULL || key == NULL)
+		return false;
+	if(strncmp(list,key,keylen) != 0)
+	{
+		printf("list and  key is not macth\n");
+		return false;
+	}
+	const char *list_s, *list_e;
+	sw_json_t *json = NULL;
+	sw_json_t *tmp_json = NULL;
+	char json_data[1024] = {0};
+	int len = 0;
+	int i = 0,k = 0;
+	bool result = false;
+
+	list_s = strstr(list,"[");
+	if(list_s == NULL)
+	{
+		printf("json list not true\n");
+		return false;
+	}
+	list_e = strstr(list_s,"]");
+	if(list_e == NULL)
+	{
+		printf("json list not true\n");
+		return false;
+	}
+	len = list_e - list_s + 1; //得到数据的大小
+	if(len > sizeof(json_data))
+	{
+		printf("fileter list is to long\n");
+		return false;
+	}
+	//sw_memcpy(json_data,sizeof(json_data),list_s,len,len);
+	json = sw_json_decode(list_s,len,json_data,sizeof(json_data));
+	if(json == NULL || json->type != VTYPE_ARRAY)
+	{
+		printf("somthing wrong in json_decode\n");
+		return false;
+	}
+	//比较解析到的信息
+	for(i=0; i<(json->jarr->count) && i<5; i++) //obj ,最多比较5个
+	{
+		tmp_json = &(json->jarr->values[i]); //每个obj 的地址
+		if(tmp_json == NULL || tmp_json->jobj->count != 2)
+		{
+			printf("obj is NULL or count not eq 2\n");
+			return false;
+		}
+		for(k = 0; k < tmp_json->jobj->count; k++) //实现比较
+			printf("name[%d] = %s,value[%d]= %s\n",k,tmp_json->jobj->nvs[k].name,k,tmp_json->jobj->nvs[k].value.str);
+		//只要有一项符合即可
+		if(para_fileter_priv_info(tmp_json->jobj->nvs[0].name,tmp_json->jobj->nvs[0].value.str,tmp_json->jobj->nvs[1].name,tmp_json->jobj->nvs[1].value.str))
+		{
+			result = true;
+			break;
+		}
+	}
+
+	return true;
+}
+//条件检测
+static bool upg_para_fileter(const char *list,int size)
+{
+	if(list == NULL)
+		return false;
+	char *p = NULL;
+	para_fileter_t fileter[4] = {{"Version",true},{"UserRange",true},{"IpRange",true},{"MacRang",true}};
+	int len = 0;
+	int i = 0;
+	//sw_json_decode();
+	for(i=0; i<4; i++)
+	{
+		p = strstr(list,fileter[i].name);
+		if(p)
+		{
+			len = strlen(fileter[i].name);
+			if(i==0)
+				fileter[i].result = para_check_softversion(p,fileter[i].name,len); //version 不是json格式,因此单独处理
+			else
+				fileter[i].result = para_fileter_decode(p,fileter[i].name,len);
+			if(!fileter[i].result)
+				break;
+		}
+	}
+	return (fileter[0].result && fileter[1].result && fileter[2].result && fileter[3].result);
+}
 //do updata
 static bool upgrade_para(const swupg_para_t *upg)
 {
@@ -263,12 +646,8 @@ static bool upgrade_para(const swupg_para_t *upg)
 	int recv_size = 0; //已读的大小
 	int ret = 0; //实际读到的大小
 	int left_size = 0;  //剩余要读的大小
-	unsigned char chip_text[32] = {0};
-	char checkcode[68] = {0};// 计算sha256的值
 	bool result = false;
 	bool need_upg = true;
-	int i = 0;
-	int pos = 0;
 	char *p = NULL;
 	char *tmp = NULL;
 
@@ -304,36 +683,38 @@ static bool upgrade_para(const swupg_para_t *upg)
 		printf("fail to recv data\n");
 		goto ERROR;
 	}
-	//对比sha256的值
-	ret = sw_sha256_sum(chip_text, (unsigned char *)data_buf,file_size);
-	for(i=0;i<ret;i++)
-		pos += snprintf(&checkcode[pos],sizeof(checkcode)-pos,"%02x",chip_text[i]);
-	if(strncmp(checkcode,upg->checkcode,pos) != 0)
-	{
-		printf("checkcode is no macth\n");
-		goto ERROR;
-	}
-	//备份将要升级的数据
+	if(sha256_check(data_buf,file_size,upg->checkcode) == false)
+		;//goto ERROR;
 
-	//找到参数的空间(TODO 目前暂且认证有效参数只存在于 这个两个标签之间)
+	//找到参数的空间,以及找到过滤项空间
 	p = strstr( data_buf,"[TMWParameterResetList]");
 	tmp = strstr( data_buf,"[STBFliterList]");
-	if(tmp) //查下是否符合升级条件
-	{
+	if(tmp && p) //查下是否符合升级条件
+		need_upg = upg_para_fileter(tmp,strlen(tmp));
+	else if(p)
 		need_upg = true;
-	}
-	if(need_upg && p)
+	else
+		need_upg = false;
+
+	if(need_upg)
 	{
-		*tmp = '\0';
+		printf("begin to upgrade para\n");
+		//将下载到的文件保存到flase中
+		upgade_para_file_save(upg->filename,data_buf,file_size);
 		p += strlen("[TMWParameterResetList]");
-		ret = upgrade_para_data(p,tmp - p);
+		//支持 [TMWParameterResetList],与[STBFliterList] 不是相邻的情况
+		ret = upgrade_para_data(p,strlen(p));
 		if(ret > 0)
+		{
+			sw_parameter_set("last_para_update_ver",(char *)upg->version);
+			sw_parameter_save();
 			printf("%d param had finish reset\n", ret);
+		}
 		else
 			printf("ret is %d\n",ret);
 	}
 
-	result = true;
+	result = need_upg;
 ERROR:
 	if(fp)
 		sw_file_close(fp);
@@ -345,29 +726,20 @@ ERROR:
 void sw_upgpara_begin(void)
 {
 	if(!check_para_config_setting(&m_upg,sizeof(m_upg)))
-	{
 		printf("not any para data to do\n");
-		return;
-	}
 	else
 	{
 		if(!upgrade_para(&m_upg))
-		{
 			printf("update para faile or not allow to upg para\n");
-			return;
-		}
-
-		//sw_parameter_set("last_para_update_ver",m_upg.version);
-		//sw_parameter_save();
-		char tmp[128] = {0};
-		if( !sw_parameter_get("hhdjajdheh",tmp,sizeof(tmp)))
+		else
 		{
-			printf("can't to find the para\n");
+			if(m_upg.is_reboot == 1)
+			{
+				sleep(3);
+				printf("reboot\n");
+			}
+		
 		}
 	}
-	if(m_upg.is_reboot == 1)
-	{
-		sleep(3);
-		printf("reboot\n");
-	}
+	return;
 }
