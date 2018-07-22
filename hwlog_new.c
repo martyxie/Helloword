@@ -70,6 +70,7 @@ static int m_start_time = 0; //开始抓日志的时间
 static int m_end_time = 0; //结束抓日志的时间
 static int m_log_level = LOG_LEVEL_OFF; //抓日志的级别
 static char m_mac[24];
+static char m_stb_type[16];
 
 static int m_default_level = LOG_LEVEL_ERROR;
 
@@ -91,7 +92,6 @@ static int m_interval_error = 2*60*60*1000; //默认2小时
 static int m_max_size = 3*1024*1024; //3M
 
 static bool m_usb_is_collect = false; //U盘抓日志的标志
-static bool m_time_sync = false; //是否已同步时间
 
 //=========文件上传=========
 
@@ -266,11 +266,14 @@ static bool log_file_upload(char *filename)
 	DIR *dirp = NULL;
 	struct dirent dirbuf;
 	struct dirent *presult = NULL;
-	int name_len = strlen("errorlog_MMddHHmmss_FFFFFFFFFFFF.tgz"); //所有日志长度命名都一样长
+	int name_len = 0;
 	HANDLE client = NULL;
 	int type = 0;
 
 	unsigned int tmp_time = 0;
+
+	sw_snprintf(s_file_name,sizeof(s_file_name),0,sizeof(s_file_name),"errorlog_%s_MMddHHmmss_FFFFFFFFFFFF.tgz",m_stb_type);
+	name_len = strlen(s_file_name); //所有日志长度命名都一样长
 
 	dirp = opendir(STB_LOG_PATH);
 	if(dirp == NULL)
@@ -308,6 +311,7 @@ static bool log_file_upload(char *filename)
 		if(client) //上传
 		{
 			//组装服务器端要保存的名字
+			sw_memset(s_file_name,sizeof(s_file_name),0,sizeof(s_file_name));
 			get_server_file_name(s_file_name,sizeof(s_file_name),type);
 			HWIPTV_LOG_DEBUG("full_name = %s,s_file_name = %s\n",full_name,s_file_name);
 			tmp_time = sw_thrd_get_tick();
@@ -331,7 +335,6 @@ static bool log_file_upload(char *filename)
 		if(tmp_time < 1000) //防止上传太快,在服务器上被覆盖
 			sw_thrd_delay(1000 - tmp_time);
 		sw_memset(full_name,sizeof(full_name),0,sizeof(full_name));
-		sw_memset(s_file_name,sizeof(s_file_name),0,sizeof(s_file_name));
 	}
 	closedir(dirp);
 TMP_FILE:
@@ -472,18 +475,14 @@ static int check_save_log(char *path, int type, int max_count)
 }
 static void get_time_info(char *file)
 {
-	//if(!m_time_sync)
-	//	return;
 	struct tm tmp;
 	char time_buf[24] = {0};
-	char cmd[72] = {0};
+	char cmd[120] = {0};
 	time_t now = time(NULL);
 	localtime_r(&now, &tmp);
 	strftime(time_buf,sizeof(time_buf),"%Y%m%d%H%M%S", &tmp);
-	sw_snprintf(cmd,sizeof(cmd),0,sizeof(cmd),"echo collect time: %s---------- >> %s/%s",time_buf,TMP_LOG_PATH,file);
-	printf("========================================cmd=%s\n",cmd);
+	sw_snprintf(cmd,sizeof(cmd),0,sizeof(cmd),"echo -----collect time: %s------ >> %s/%s",time_buf,TMP_LOG_PATH,file);
 	swsyscmd(cmd);
-	printf("-----------------------------------------\n");
 }
 
 static void get_proc_info(void)
@@ -615,9 +614,9 @@ static int chang_tmp_log_path(int type,char *log_path,int size)
 		return -1;
 	}
 	if(type == ERROR_LOG)
-		sw_snprintf(file,sizeof(file),0,sizeof(file),"errorlog_%02d%02d%02d%02d%02d_%s",tm.tm_mon+1,tm.tm_mday,tm.tm_hour,tm.tm_min,tm.tm_sec,m_mac);
+		sw_snprintf(file,sizeof(file),0,sizeof(file),"errorlog_%s_%02d%02d%02d%02d%02d_%s",m_stb_type,tm.tm_mon+1,tm.tm_mday,tm.tm_hour,tm.tm_min,tm.tm_sec,m_mac);
 	else //debug
-		sw_snprintf(file,sizeof(file),0,sizeof(file),"debuglog_%02d%02d%02d%02d%02d_%s",tm.tm_mon+1,tm.tm_mday,tm.tm_hour,tm.tm_min,tm.tm_sec,m_mac);
+		sw_snprintf(file,sizeof(file),0,sizeof(file),"debuglog_%s_%02d%02d%02d%02d%02d_%s",m_stb_type,tm.tm_mon+1,tm.tm_mday,tm.tm_hour,tm.tm_min,tm.tm_sec,m_mac);
 
 	sw_snprintf(cmd,sizeof(cmd),0,sizeof(cmd),"mv %s %s/%s",TMP_LOG_PATH,TMP_LOG_BASE_PATH,file);
 	swsyscmd(cmd); //修改名称
@@ -678,9 +677,9 @@ void hw_set_tmp_loglevel(int level,int timeout)
 	}
 	m_chang_info.level = level;
 	m_chang_info.time_out=timeout;
-	sw_log_set_level(level);
-	m_chang_info.start_time = sw_thrd_get_tick();
+	m_chang_info.start_time = sw_thrd_get_tick()/1000;
 	HWIPTV_LOG_INFO("log_level %d ---> %d\n",sw_log_get_level(),level);
+	sw_log_set_level(level);
 }
 
 
@@ -691,7 +690,9 @@ static void commit_log_file(int type,char *filename)
 	int ret = 0;
 	char save_name[64] = {0};
 	if(filename[0] != '\0')
+	{
 		ret = pack_and_compress_log(type,filename,save_name,sizeof(save_name));
+	}
 
 	if(type == ERROR_LOG && ret > 0)
 		save_file_to_flash(save_name,type);	
@@ -869,13 +870,14 @@ static bool collect_log_proc(uint32_t wparam,uint32_t lparam)
 {
 	time_t now = 0;
 	int count = 0;
+	bool time_sync = false; //是否已同步时间
 	char file_name[64] = {0};
 	while(!m_proc_exit)
 	{
-		if(!m_time_sync) //检测是否已同步时间
+		if(!time_sync) //检测是否已同步时间
 		{
 			if(hw_time_get_state() || sw_get_dvb_sync_time_state())
-				m_time_sync = true;
+				time_sync = true;
 			else
 				HWIPTV_LOG_DEBUG("sys time is not sync\n");
 		}
@@ -889,7 +891,7 @@ static bool collect_log_proc(uint32_t wparam,uint32_t lparam)
 				if(m_log_mode == LOG_MODE_ERROR)
 					type = ERROR_LOG;
 				else if(m_log_mode == LOG_MODE_DEBUG)
-					type = ERROR_LOG;
+					type = DEBUG_LOG;
 				if(type)
 				{
 					sw_memset(file_name,sizeof(file_name),0,sizeof(file_name));
@@ -900,8 +902,8 @@ static bool collect_log_proc(uint32_t wparam,uint32_t lparam)
 				m_log_mode = LOG_MODE_USB;
 			}
 		}
-		//TMS off,|| m_time_sync = false || m_start_time < now || now > m_end_time
-		else if(m_log_level < LOG_LEVEL_OFF && m_time_sync && m_start_time < now && now < m_end_time) //TMS_抓日志条件
+		//TMS off,|| time_sync = false || m_start_time < now || now > m_end_time
+		else if(m_log_level < LOG_LEVEL_OFF && time_sync && m_start_time < now && now < m_end_time) //TMS_抓日志条件
 		{
 			//启动搜集日志
 			printf("DEBUG =========\n");
@@ -927,11 +929,6 @@ static bool collect_log_proc(uint32_t wparam,uint32_t lparam)
 					commit_log_file(ERROR_LOG,file_name); //保存err日志
 					sw_memset(file_name,sizeof(file_name),0,sizeof(file_name));
 					commit_log_file(DEBUG_LOG,file_name); //将flash中所有日志上传
-					m_commit_time = sw_thrd_get_tick()/1000;
-				}
-				else if(m_log_mode == LOG_MODE_NULL) //上传flash中的日志,每次开机时可能走到 一般走不到
-				{
-					commit_log_file(ERROR_LOG,file_name);
 					m_commit_time = sw_thrd_get_tick()/1000;
 				}
 				m_log_mode = LOG_MODE_DEBUG;
@@ -1025,19 +1022,26 @@ void hw_new_log_init(void)
 	if(sw_parameter_get("loglevel",buf,sizeof(buf)))
 		m_log_level = get_swlog_level(atoi(buf));
 	else
-		 HWIPTV_LOG_WARN("not find the para: loglevel\n");
+		 HWIPTV_LOG_WARN("fail to get the para: loglevel\n");
 
 	sw_memset(buf,sizeof(buf),0,sizeof(buf));
 	if(sw_parameter_get("logstarttime",buf,sizeof(buf)))
 		m_start_time = atoi(buf);
 	else
-		 HWIPTV_LOG_WARN("not find the para: logstarttime\n");
+		 HWIPTV_LOG_WARN("fail to get the para: logstarttime\n");
 
 	sw_memset(buf,sizeof(buf),0,sizeof(buf));
 	if(sw_parameter_get("logendtime",buf,sizeof(buf)))
 		m_end_time = atoi(buf);
 	else
-		HWIPTV_LOG_WARN("not find the para: logendtime\n");
+		HWIPTV_LOG_WARN("fail to get the para: logendtime\n");
+
+	sw_memset(m_stb_type,sizeof(m_stb_type),0,sizeof(m_stb_type));
+	if(!sw_parameter_get("hardware_type",m_stb_type,sizeof(m_stb_type)))
+	{
+		sw_snprintf(m_stb_type,sizeof(m_stb_type),0,sizeof(m_stb_type),"EC2108CV5");
+		HWIPTV_LOG_WARN("fail to get the para: hardware_type\n");
+	}
 
 	//初始化error日志保存时间
 	sw_memset(buf,sizeof(buf),0,sizeof(buf));
@@ -1048,7 +1052,7 @@ void hw_new_log_init(void)
 			m_interval_error = 10*60;
 	}
 	else
-		HWIPTV_LOG_WARN("not find the para:TimeIntervalForLogToFlash\n");
+		HWIPTV_LOG_WARN("fail to get the para:TimeIntervalForLogToFlash\n");
 
 	//启动检测线程
 	m_colloectlog_thrd = sw_thrd_open( "tCollectlog_thrd", 168, 0, 1024*8,collect_log_proc ,0,0);
@@ -1058,6 +1062,7 @@ void hw_new_log_init(void)
 		return;
 	}
 	sw_thrd_resume(m_colloectlog_thrd);
+	//删除上个版本的日志,防止占用空间
 	return;
 }
 //压缩信息,停止搜集日志
@@ -1072,14 +1077,14 @@ int hw_usb_collectlog(bool usb)
 	m_usb_is_collect = usb;
 	if(usb)
 	{
-		for(;;) //最多等2秒
+		for(;;)
 		{
 			if(m_log_mode == LOG_MODE_USB)
 				break;
-			if(count > 10)
+			if(count > 25)
 				break;
 			count ++;
-			sw_thrd_delay(200);
+			sw_thrd_delay(300);
 		}
 	}
 	else if(m_log_mode == LOG_MODE_USB)
